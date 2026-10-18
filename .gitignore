@@ -1,0 +1,11 @@
+.gradle/
+build/
+**/build/
+local.properties
+.idea/
+*.iml
+.env
+.env.*
+!.env.example
+secrets.properties
+repomix-output.xml

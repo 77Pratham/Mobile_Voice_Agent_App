@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">AI Voice Assistant</string>
+    <string name="start">Tap to Speak</string>
+    <string name="stop">Stop Listening</string>
+</resources>
