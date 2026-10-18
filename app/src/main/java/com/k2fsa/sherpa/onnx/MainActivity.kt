@@ -244,7 +244,7 @@ class MainActivity : AppCompatActivity() {
                         isProcessingResponse = true
                         try {
                             val text = runSecondPass(segment.samples)
-                            if (text.isNotBlank()) {
+                            if (text.isNotBlank() && !isJunk(text)) {
                                 synchronized(respondLock) {
                                     runOnUiThread { statusText.text = "Thinking..." }
                                     val reply = try { askLlm(text) } catch (e: Exception) { Log.e(TAG, "LLM failed", e); "" }
@@ -260,6 +260,8 @@ class MainActivity : AppCompatActivity() {
                                         statusText.text = if (isRecording) "Listening..." else "Tap button below to start"
                                     }
                                 }
+                            } else if (text.isNotBlank()) {
+                                Log.i(TAG, "STT gate rejected junk/malformed transcript: '$text'")
                             }
                         } finally {
                             vad.reset()
@@ -316,7 +318,6 @@ class MainActivity : AppCompatActivity() {
         val words = text.lowercase().split(Regex("\\s+")).filter { it.isNotBlank() }
         if (words.isEmpty()) return false
 
-        // Common valid English words to protect true English queries
         val commonEnglishWords = setOf(
             "what", "is", "the", "weather", "forecast", "for", "tomorrow", "can", "you",
             "set", "an", "alarm", "reminder", "at", "time", "clock", "hello", "hi", "how", "are",
@@ -327,7 +328,6 @@ class MainActivity : AppCompatActivity() {
         for (word in words) {
             if (word in commonEnglishWords) continue
 
-            // Words with unusual consonant patterns or missing vowels (e.g., "mjkalsubh", "sadh", "vaaj")
             val vowelCount = word.count { it in "aeiou" }
             if (word.length >= 4 && vowelCount == 0) suspiciousWordCount++
             if (word.length >= 7 && vowelCount.toFloat() / word.length < 0.25f) suspiciousWordCount++
@@ -350,7 +350,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun cleanDevanagari(s: String): String {
         val words = s.split(Regex("\\s+")).map { word ->
-            // Strip leading combining marks/matras/virama from each word
             word.dropWhile { ch ->
                 ch in '\u0900'..'\u0903' || ch in '\u093C'..'\u094D' || ch in '\u0951'..'\u0957'
             }
@@ -366,8 +365,6 @@ class MainActivity : AppCompatActivity() {
         val l = lang.replace("<|", "").replace("|>", "")
         val arabic = text.any { it in '\u0600'..'\u06FF' }
 
-        // Only re-decode with recHi if text contains Urdu/Arabic script OR is garbled Latin
-        // AND is NOT coherent English/Hinglish text
         val needsHindiRedecode = !hinglishMode && (arabic || l == "ur" || isGarbledLatin(text)) && !isCoherentLatin(text)
 
         if (needsHindiRedecode) {
@@ -389,14 +386,23 @@ class MainActivity : AppCompatActivity() {
 
     private fun handleActions(reply: String): String {
         val m = Regex("\\[\\[ALARM (\\d{1,2}):(\\d{2})(?: ([^\\]]*))?\\]\\]").find(reply) ?: return reply
-        startActivity(Intent(AlarmClock.ACTION_SET_ALARM).apply {
-            putExtra(AlarmClock.EXTRA_HOUR, m.groupValues[1].toInt())
-            putExtra(AlarmClock.EXTRA_MINUTES, m.groupValues[2].toInt())
-            putExtra(AlarmClock.EXTRA_MESSAGE, m.groupValues[3].ifBlank { "Reminder" })
-            putExtra(AlarmClock.EXTRA_SKIP_UI, true)
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        })
+        executeSetAlarm(m.groupValues[1].toInt(), m.groupValues[2].toInt(), m.groupValues[3])
         return reply.replace(m.value, "").trim()
+    }
+
+    private fun executeSetAlarm(hour: Int, minute: Int, label: String) {
+        try {
+            startActivity(Intent(AlarmClock.ACTION_SET_ALARM).apply {
+                putExtra(AlarmClock.EXTRA_HOUR, hour)
+                putExtra(AlarmClock.EXTRA_MINUTES, minute)
+                putExtra(AlarmClock.EXTRA_MESSAGE, label.ifBlank { "Reminder" })
+                putExtra(AlarmClock.EXTRA_SKIP_UI, true)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            })
+            Log.i(TAG, "Alarm set via intent: %02d:%02d (%s)".format(hour, minute, label))
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to set alarm", e)
+        }
     }
 
     private fun isJunk(t: String): Boolean {
@@ -406,7 +412,6 @@ class MainActivity : AppCompatActivity() {
         val letters = s.count { it.isLetter() }
         if (letters < 2) return true
 
-        // Devanagari combining marks vs base consonants validation
         val devanagariChars = s.filter { it in '\u0900'..'\u097F' }
         if (devanagariChars.isNotEmpty()) {
             val baseConsonants = devanagariChars.count { it in '\u0905'..'\u0939' || it in '\u0958'..'\u0961' }
@@ -416,7 +421,6 @@ class MainActivity : AppCompatActivity() {
             if (baseConsonants == 0 || combiningMarks > baseConsonants) return true
         }
 
-        // Repeated tokens check
         val tokens = s.split(Regex("\\s+"))
         if (tokens.size >= 3 && tokens.distinct().size * 2 <= tokens.size) return true
         return false
@@ -437,7 +441,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // espeak-ng-data must be a real folder, not an asset, so copy it once
     private fun ensureEspeakData(folder: String): String {
         val root = File(filesDir, "tts-data")
         val target = File(root, "$folder/espeak-ng-data")
@@ -591,51 +594,90 @@ FORMATTING RULES:
 - Write numbers as digits. Never write times with ":00" (write 5 PM or 5 बजे, never 5:00 or 5:00 PM).
 - Never use emojis, markdown, lists or quotation marks.
 
-RECOGNITION REPAIR:
+UNCERTAINTY & CLARIFICATION RULES:
+- If the transcript is unclear, incomplete, or nonsensical, ask the user to repeat in one short sentence instead of guessing.
+- Never invent missing words, times, locations, or actions.
 - The user's transcript may contain errors. If the transcript is in Urdu or Arabic script, treat it as spoken Hindi (Hindustani) and reply in Hindi using Devanagari.
-- If the transcript is nonsense, ask the user to repeat in one short sentence instead of guessing.
-- Examples of Hinglish repairs:
-  - "my next meeting cup" -> "meri next meeting kab hai"
-  - "aaj ka sedul", "aaj ka shedule", "aaj ka shell", "aaj ka plan" -> "aaj ka schedule kya hai"
-  - "meeting cup", "meeting kab" -> "meeting kab hai"
-
-ACTIONS & ALARMS:
-- Treat reminders as alarms: if the user gives a time for an alarm or reminder, start your reply with [[ALARM HH:MM label]] using 24-hour time, then confirm in one short sentence.
-- Hindi time words: subah = AM, dopahar = noon, shaam = PM, raat = PM; saat/सात = 7, paanch/पाँच = 5; "kal" = tomorrow, "aaj" = today.
-- If Calendar Data is provided, answer from it directly and briefly: today's events and the next meeting.
 """.trimIndent()
+
+    private fun getToolsArray(): JSONArray {
+        val tools = JSONArray()
+
+        // Tool 1: get_weather
+        val weatherParams = JSONObject()
+            .put("type", "object")
+            .put("properties", JSONObject().put("location", JSONObject().put("type", "string").put("description", "City name, e.g. Bengaluru")))
+        tools.put(JSONObject()
+            .put("type", "function")
+            .put("function", JSONObject()
+                .put("name", "get_weather")
+                .put("description", "Get live weather forecast for a location")
+                .put("parameters", weatherParams)))
+
+        // Tool 2: get_calendar_events
+        val calendarParams = JSONObject().put("type", "object").put("properties", JSONObject())
+        tools.put(JSONObject()
+            .put("type", "function")
+            .put("function", JSONObject()
+                .put("name", "get_calendar_events")
+                .put("description", "Get today's calendar schedule, agenda, and upcoming meetings")
+                .put("parameters", calendarParams)))
+
+        // Tool 3: set_alarm
+        val alarmProperties = JSONObject()
+            .put("hour", JSONObject().put("type", "integer").put("description", "Hour in 24-hour format (0 to 23)"))
+            .put("minute", JSONObject().put("type", "integer").put("description", "Minute (0 to 59)"))
+            .put("label", JSONObject().put("type", "string").put("description", "Label for the alarm or reminder"))
+        val alarmParams = JSONObject()
+            .put("type", "object")
+            .put("properties", alarmProperties)
+            .put("required", JSONArray().put("hour").put("minute"))
+        tools.put(JSONObject()
+            .put("type", "function")
+            .put("function", JSONObject()
+                .put("name", "set_alarm")
+                .put("description", "Set an alarm or reminder for a specific time")
+                .put("parameters", alarmParams)))
+
+        return tools
+    }
+
+    private fun executeToolCall(name: String, args: JSONObject): String {
+        return when (name) {
+            "get_weather" -> {
+                fetchWeather()
+            }
+            "get_calendar_events" -> {
+                fetchCalendar()
+            }
+            "set_alarm" -> {
+                val hour = args.optInt("hour", -1)
+                val minute = args.optInt("minute", -1)
+                val label = args.optString("label", "Reminder")
+                if (hour in 0..23 && minute in 0..59) {
+                    executeSetAlarm(hour, minute, label)
+                    "Alarm set successfully for %02d:%02d (%s)".format(hour, minute, label)
+                } else {
+                    "Invalid alarm time requested: hour=$hour, minute=$minute"
+                }
+            }
+            else -> "Unknown tool: $name"
+        }
+    }
 
     private val history = mutableListOf<Pair<String, String>>()
     private val respondLock = Any()
 
-    private fun askLlm(userText: String): String {
-        val t0 = System.nanoTime()
-        val isWeather = listOf("weather", "temperature", "mausam", "mousam", "मौसम", "forecast", "rain").any {
-            userText.contains(it, ignoreCase = true)
-        }
-        val isSchedule = listOf("schedule", "shedule", "sedul", "calendar", "next meeting", "शेड्यूल", "agenda").any {
-            userText.contains(it, ignoreCase = true)
-        }
-        val queryText = when {
-            isWeather -> "$userText\n[Live Weather Data: ${fetchWeather()}]"
-            isSchedule -> "$userText\n[Calendar Data: ${fetchCalendar()}]"
-            else -> userText
-        }
-
-        val msgs = JSONArray()
-        msgs.put(JSONObject().put("role", "system").put("content", SYSTEM_PROMPT))
-        synchronized(history) {
-            history.takeLast(6).forEach {
-                msgs.put(JSONObject().put("role", it.first).put("content", it.second))
-            }
-        }
-        msgs.put(JSONObject().put("role", "user").put("content", queryText))
+    private fun postToGroq(msgs: JSONArray, tools: JSONArray? = null): JSONObject {
         val body = JSONObject()
             .put("model", LLM_MODEL)
             .put("messages", msgs)
-            .put("temperature", 0.3)
-            .put("reasoning_effort", "low")
+            .put("temperature", 0.2)
             .put("max_completion_tokens", 250)
+        if (tools != null) {
+            body.put("tools", tools)
+            body.put("tool_choice", "auto")
+        }
 
         val conn = (URL("https://api.groq.com/openai/v1/chat/completions").openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
@@ -651,13 +693,70 @@ ACTIONS & ALARMS:
         val resp = stream.bufferedReader(Charsets.UTF_8).use { it.readText() }
         if (code !in 200..299) {
             Log.e(TAG, "LLM HTTP $code: $resp")
-            return ""
+            return JSONObject()
         }
-        val msg = JSONObject(resp).getJSONArray("choices").getJSONObject(0).getJSONObject("message")
-        var reply = if (msg.isNull("content")) "" else msg.getString("content")
+        return JSONObject(resp)
+    }
+
+    private fun askLlm(userText: String): String {
+        val t0 = System.nanoTime()
+        val msgs = JSONArray()
+        msgs.put(JSONObject().put("role", "system").put("content", SYSTEM_PROMPT))
+        synchronized(history) {
+            history.takeLast(6).forEach {
+                msgs.put(JSONObject().put("role", it.first).put("content", it.second))
+            }
+        }
+        msgs.put(JSONObject().put("role", "user").put("content", userText))
+
+        val respObj = postToGroq(msgs, getToolsArray())
+        if (!respObj.has("choices")) return ""
+
+        val choiceMsg = respObj.getJSONArray("choices").getJSONObject(0).getJSONObject("message")
+
+        // Handle structured tool calls if requested by LLM
+        if (choiceMsg.has("tool_calls") && !choiceMsg.isNull("tool_calls")) {
+            val toolCalls = choiceMsg.getJSONArray("tool_calls")
+            if (toolCalls.length() > 0) {
+                msgs.put(choiceMsg)
+                for (i in 0 until toolCalls.length()) {
+                    val tc = toolCalls.getJSONObject(i)
+                    val callId = tc.getString("id")
+                    val fn = tc.getJSONObject("function")
+                    val fnName = fn.getString("name")
+                    val fnArgsStr = fn.optString("arguments", "{}")
+                    val fnArgs = try { JSONObject(fnArgsStr) } catch (e: Exception) { JSONObject() }
+
+                    Log.i(TAG, "LLM requested tool call: $fnName with args: $fnArgsStr")
+                    val toolResult = executeToolCall(fnName, fnArgs)
+
+                    val toolMsg = JSONObject()
+                        .put("role", "tool")
+                        .put("tool_call_id", callId)
+                        .put("content", toolResult)
+                    msgs.put(toolMsg)
+                }
+
+                // Re-call LLM to generate final conversational response
+                val secondResp = postToGroq(msgs, null)
+                if (secondResp.has("choices")) {
+                    val finalMsg = secondResp.getJSONArray("choices").getJSONObject(0).getJSONObject("message")
+                    var reply = if (finalMsg.isNull("content")) "" else finalMsg.getString("content")
+                    reply = reply.replace(Regex("(?s)<think>.*?</think>"), "").trim()
+                    Log.i(TAG, "LLM (tool final): answered in %d ms -> '%s'".format((System.nanoTime() - t0) / 1_000_000, reply))
+                    synchronized(history) {
+                        history.add("user" to userText)
+                        history.add("assistant" to reply)
+                    }
+                    return reply
+                }
+            }
+        }
+
+        var reply = if (choiceMsg.isNull("content")) "" else choiceMsg.getString("content")
         reply = reply.replace(Regex("(?s)<think>.*?</think>"), "").trim()
         if (reply.isEmpty()) {
-            Log.e(TAG, "LLM returned empty reply: $resp")
+            Log.e(TAG, "LLM returned empty reply")
             return ""
         }
         Log.i(TAG, "LLM: answered in %d ms -> '%s'".format((System.nanoTime() - t0) / 1_000_000, reply))
