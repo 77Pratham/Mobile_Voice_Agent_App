@@ -2,7 +2,6 @@
 
 An Android voice-assistant prototype built with Kotlin. It supports spoken interaction in English and Hindi/Hinglish, using on-device speech components for speech recognition and speech synthesis, with a cloud LLM for conversational responses.
 
-> **Project status:** Internship assignment prototype. Latency, transcription accuracy, and pronunciation quality have not yet been formally benchmarked, so this README does not claim measured scores.
 
 ## Features
 
@@ -79,7 +78,6 @@ An Android voice-assistant prototype built with Kotlin. It supports spoken inter
 
 - This is a prototype, not a production-hardened voice assistant.
 - English/Hindi/Hinglish recognition and code-switching should be tested with representative speakers and audio conditions.
-- Latency, word error rate (WER), transcription accuracy, and pronunciation quality have **not** been quantified in this repository. Do not infer numerical performance claims without running a documented evaluation.
 - Behavior can vary depending on device performance, microphone quality, model files, permissions, and network availability.
 - Cloud LLM calls send recognized user text to the configured provider. Avoid speaking sensitive personal information during testing.
 - Check model licenses and usage terms before redistribution.
